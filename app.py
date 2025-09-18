@@ -1,83 +1,108 @@
-# app.py — Sesión 3 IoT (single-file, web-only)
-import io
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 import streamlit as st
-from dataclasses import dataclass
+import pandas as pd
+import plotly.express as px
 
+# -----------------------
+# Configuración inicial
+# -----------------------
+st.set_page_config(
+    page_title="Comparativa Protocolos IoT",
+    page_icon="📡",
+    layout="wide"
+)
 
-st.set_page_config(page_title="Sesión 3 · Protocolos IoT", page_icon="📡", layout="wide")
-st.title("📡 Sesión 3 · Comparativa de Protocolos IoT (WiFi, Zigbee, LoRaWAN, NB-IoT)")
-st.caption("Grado en Ingeniería Informática · Blockchain y IoT · Práctica 100% web")
+st.title("📡 Comparativa de Protocolos IoT")
+st.markdown("Explora **WiFi, Zigbee, LoRaWAN y NB-IoT** según consumo, latencia, cobertura y duración de batería.")
 
+# -----------------------
+# Parámetros del usuario
+# -----------------------
+st.sidebar.header("⚙️ Parámetros de simulación")
+n_sensores = st.sidebar.slider("Número de sensores", 1, 500, 50)
+mensajes_dia = st.sidebar.slider("Mensajes por sensor al día", 1, 500, 50)
+payload = st.sidebar.slider("Tamaño del payload (bytes)", 1, 512, 50)
+bateria = st.sidebar.slider("Capacidad de la batería (mAh)", 100, 10000, 2000)
+overhead = st.sidebar.slider("Overhead (%)", 1, 50, 10)
 
-# ---------- Modelo en un archivo ----------
-@dataclass
-class ProtocolParams:
-name: str
-bitrate_bps: float
-tx_current_mA: float
-rx_current_mA: float
-idle_current_mA: float
-range_m: float
-overhead_bytes: int
-base_latency_ms: float
-duty_cycle_limit: float
-notes: str = ""
+# -----------------------
+# Funciones de cálculo (cacheadas)
+# -----------------------
+@st.cache_data
+def calcular_metricas(n_sensores, mensajes_dia, payload, bateria, overhead):
+    # Valores base (aproximados y didácticos, no industriales)
+    protocolos = {
+        "WiFi": {"consumo": 15, "latencia": 50, "cobertura": 50},
+        "Zigbee": {"consumo": 5, "latencia": 30, "cobertura": 100},
+        "LoRaWAN": {"consumo": 1, "latencia": 1000, "cobertura": 10000},
+        "NB-IoT": {"consumo": 2, "latencia": 150, "cobertura": 1000},
+    }
 
+    resultados = []
+    for proto, vals in protocolos.items():
+        # Consumo estimado por mensaje
+        consumo_mensaje = (payload * (1 + overhead/100)) * vals["consumo"] / 1000
+        consumo_dia = consumo_mensaje * mensajes_dia * n_sensores
+        # Duración de la batería en días
+        duracion_bateria = bateria * 1000 / consumo_dia if consumo_dia > 0 else 0
 
-def default_protocols():
-return [
-ProtocolParams("WiFi", 10e6, 180.0, 50.0, 5.0, 30, 80, 50, 1.0, "alto throughput"),
-ProtocolParams("Zigbee", 250e3, 35.0, 19.0, 0.3, 100, 25, 100, 1.0, "malla, bajo consumo"),
-ProtocolParams("LoRaWAN", 5e3, 45.0, 12.0, 0.01, 15000,20, 800, 0.01, "largo alcance, bajo bitrate"),
-ProtocolParams("NB-IoT", 26e3, 220.0, 30.0, 0.05, 10000,30, 200, 1.0, "cobertura celular"),
-]
+        resultados.append({
+            "Protocolo": proto,
+            "Consumo diario (mAh)": round(consumo_dia, 2),
+            "Latencia (ms)": vals["latencia"],
+            "Cobertura (m)": vals["cobertura"],
+            "Duración batería (días)": round(duracion_bateria, 2)
+        })
 
+    return pd.DataFrame(resultados)
 
-def scenario(n_sensors:int, msgs_per_day:int, payload_bytes:int, rx_ratio:float):
-return dict(n_sensors=n_sensors, msgs_per_day=msgs_per_day,
-payload_bytes=payload_bytes, rx_ratio=rx_ratio)
+df = calcular_metricas(n_sensores, mensajes_dia, payload, bateria, overhead)
 
+# -----------------------
+# Visualización
+# -----------------------
+st.subheader("📊 Resultados comparativos")
+st.dataframe(df, use_container_width=True)
 
-def estimate(proto: ProtocolParams, sc: dict, battery_mAh: float, header_factor: float=1.0):
-msgs = sc["msgs_per_day"]; payload = sc["payload_bytes"]; rx_ratio = sc["rx_ratio"]
-bytes_total = payload + int(proto.overhead_bytes * header_factor)
-bits_total = bytes_total * 8
-# tiempo de transmisión por mensaje (s)
-tx_time_s = bits_total / proto.bitrate_bps
-# tiempo de recepción estimado por mensaje (s)
-rx_time_s = tx_time_s * rx_ratio
-# si existe limitación por duty-cycle, ajustar (simulación simplificada)
-if proto.duty_cycle_limit < 1.0:
-# empujamos el TX time efectivo para respetar duty-cycle (modelo didáctico)
-tx_time_s = tx_time_s / proto.duty_cycle_limit
-tx_total_h = (tx_time_s * msgs) / 3600.0
-rx_total_h = (rx_time_s * msgs) / 3600.0
-active_h = tx_total_h + rx_total_h
-idle_h = max(0.0, 24.0 - active_h)
-tx_mAh = proto.tx_current_mA * tx_total_h
-rx_mAh = proto.rx_current_mA * rx_total_h
-idle_mAh = proto.idle_current_mA * idle_h
-daily_mAh_per_sensor = tx_mAh + rx_mAh + idle_mAh
-latency_ms = proto.base_latency_ms + (tx_time_s * 1000.0)
-days_battery = battery_mAh / daily_mAh_per_sensor if daily_mAh_per_sensor > 0 else float('inf')
-return {
-"protocol": proto.name,
-"consumo_mAh_dia": daily_mAh_per_sensor,
-"latencia_ms": latency_ms,
-"cobertura_m": proto.range_m,
-"dias_bateria": days_battery,
-"notas": proto.notes
-}
+col1, col2 = st.columns(2)
 
+with col1:
+    fig1 = px.bar(df, x="Protocolo", y="Consumo diario (mAh)", color="Protocolo",
+                  title="Consumo energético diario")
+    st.plotly_chart(fig1, use_container_width=True)
 
-def evaluate_all(protocols, sc, battery_mAh, header_factor):
-rows = [estimate(p, sc, battery_mAh, header_factor) for p in protocols]
-df = pd.DataFrame(rows)
-return df.sort_values(by="consumo_mAh_dia").reset_index(drop=True)
+    fig2 = px.bar(df, x="Protocolo", y="Latencia (ms)", color="Protocolo",
+                  title="Latencia de transmisión")
+    st.plotly_chart(fig2, use_container_width=True)
 
+with col2:
+    fig3 = px.bar(df, x="Protocolo", y="Cobertura (m)", color="Protocolo",
+                  title="Cobertura estimada")
+    st.plotly_chart(fig3, use_container_width=True)
 
-# ---------- UI ----------
-st.caption("Modelo docente y simplificado. Ajusta parámetros para explorar compromisos reales.")
+    fig4 = px.bar(df, x="Protocolo", y="Duración batería (días)", color="Protocolo",
+                  title="Duración estimada de la batería")
+    st.plotly_chart(fig4, use_container_width=True)
+
+# -----------------------
+# Exportación
+# -----------------------
+st.subheader("💾 Exportar resultados")
+csv = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "Descargar CSV",
+    data=csv,
+    file_name="resultados_protocolos.csv",
+    mime="text/csv"
+)
+
+# -----------------------
+# Justificación del caso aplicado
+# -----------------------
+st.subheader("📝 Justificación del caso aplicado")
+st.markdown("Redacta aquí tu defensa sobre el protocolo más adecuado según tu escenario (hogar, ciudad, agricultura...).")
+texto = st.text_area("Escribe tu justificación aquí")
+
+if st.button("Guardar justificación"):
+    with open("justificacion.md", "w", encoding="utf-8") as f:
+        f.write(texto)
+    st.success("Justificación guardada en **justificacion.md**")
